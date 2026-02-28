@@ -340,10 +340,7 @@ def main(args):
                                    )
 
     elif args.dataset == 'demon':
-        # train_set = DemonDataset(mode='train',
-        #                          transforms=train_transform,
-        #                          )
-        train_set = DemonDataset(mode='test',
+        train_set = DemonDataset(mode='train',
                                  transforms=train_transform,
                                  )
     else:
@@ -491,7 +488,7 @@ def main(args):
             total_steps += 1
 
             if args.local_rank == 0:
-                if total_steps % 100 == 1:
+                if total_steps % 10 == 1:
                     print('Step: %d' % total_steps, 'Loss: %f' % loss.item(), 'Time: %f' % ((time.time() - time_start) / total_steps))
                 if total_steps % args.save_ckpt_freq == 0 or total_steps == args.num_steps:
                     print('Save checkpoint at step: %d' % total_steps)
