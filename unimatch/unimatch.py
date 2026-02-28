@@ -22,6 +22,7 @@ class UniMatch(nn.Module):
                  ffn_dim_expansion=4,
                  num_transformer_layers=6,
                  reg_refine=False,  # optional local regression refinement
+                 rope_type='none',
                  task='flow',
                  ):
         super(UniMatch, self).__init__()
@@ -39,6 +40,7 @@ class UniMatch(nn.Module):
                                               d_model=feature_channels,
                                               nhead=num_head,
                                               ffn_dim_expansion=ffn_dim_expansion,
+                                              rope_type=rope_type,
                                               )
 
         # propagation with self-attn

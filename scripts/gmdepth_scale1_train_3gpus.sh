@@ -3,7 +3,11 @@
 # basic GMDepth without any refinement (1/8 feature only)
 
 # number of gpus for training, please set according to your hardware
+<<<<<<< Updated upstream
 # trained on 3x 80GB A100 gpus
+=======
+# trained on 3 x 80GB A100 gpus
+>>>>>>> Stashed changes
 NUM_GPUS=3
 
 

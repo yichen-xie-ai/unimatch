@@ -176,6 +176,7 @@ def main(args):
                          ffn_dim_expansion=args.ffn_dim_expansion,
                          num_transformer_layers=args.num_transformer_layers,
                          reg_refine=args.reg_refine,
+                         rope_type=args.rope_type,
                          task=args.task).to(device)
 
     if args.distributed:
@@ -488,7 +489,7 @@ def main(args):
             total_steps += 1
 
             if args.local_rank == 0:
-                if total_steps % 10 == 1:
+                if total_steps % 100 == 1:
                     print('Step: %d' % total_steps, 'Loss: %f' % loss.item(), 'Time: %f' % ((time.time() - time_start) / total_steps))
                 if total_steps % args.save_ckpt_freq == 0 or total_steps == args.num_steps:
                     print('Save checkpoint at step: %d' % total_steps)

@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .attention import (single_head_full_attention, single_head_split_window_attention,
                         single_head_full_attention_1d, single_head_split_window_attention_1d)
 from .utils import generate_shift_window_attn_mask, generate_shift_window_attn_mask_1d
 from .attention_rope import single_head_split_window_attention_rope
 from .attention_urope import multihead_split_window_attention_urope
+from .attention_rope_depth import single_head_split_window_attention_rope_depth
 
 
 class TransformerLayer(nn.Module):
@@ -14,6 +16,8 @@ class TransformerLayer(nn.Module):
                  nhead=1,
                  no_ffn=False,
                  ffn_dim_expansion=4,
+                 rope_type='none',
+                 is_self_attn=True,
                  ):
         super(TransformerLayer, self).__init__()
 
@@ -42,6 +46,25 @@ class TransformerLayer(nn.Module):
             self.norm2 = nn.LayerNorm(d_model)
         
         self.is_self_attn = self.no_ffn
+        if rope_type == 'rayrope_depth':
+            if nhead > 1:
+                bias_init = torch.cat([torch.Tensor([-5, 0.54, 0.54, -5])] * (nhead // 2))
+            else:
+                bias_init = torch.Tensor([-5, 0.54])
+            if is_self_attn:
+                self.q_depth = nn.Linear(d_model, nhead*2)
+                self.k_depth = self.q_depth
+                with torch.no_grad():
+                    self.q_depth.weight.zero_() 
+                    self.q_depth.bias.copy_(bias_init)
+            else:
+                self.q_depth = nn.Linear(d_model, nhead*2)
+                self.k_depth = nn.Linear(d_model, nhead*2)
+                with torch.no_grad():
+                    self.q_depth.weight.zero_() 
+                    self.q_depth.bias.copy_(bias_init)
+                    self.k_depth.weight.zero_() 
+                    self.k_depth.bias.copy_(bias_init)
 
     def forward(self, source, target,
                 height=None,
@@ -62,6 +85,9 @@ class TransformerLayer(nn.Module):
         is_self_attn = (query - key).abs().max() < 1e-6
 
         # single-head attention
+        
+        query_features = query
+        key_features = key
         query = self.q_proj(query)  # [B, L, C]
         key = self.k_proj(key)  # [B, L, C]
         value = self.v_proj(value)  # [B, L, C]
@@ -93,6 +119,19 @@ class TransformerLayer(nn.Module):
                                                                      pose=pose,
                                                                      is_self_attn=is_self_attn,
                                                                     )
+                elif rope_type == 'rayrope_depth':
+                    q_depth = self.q_depth(query)
+                    q_depth = q_depth.reshape(q_depth.shape[0], q_depth.shape[1], self.nhead, 2)
+                    q_depth = q_depth.permute(0, 2, 1, 3)  # [B, nhead, L, 2]
+                    k_depth = self.k_depth(key)
+                    k_depth = k_depth.reshape(k_depth.shape[0], k_depth.shape[1], self.nhead, 2)
+                    k_depth = k_depth.permute(0, 2, 1, 3)  # [B, nhead, L, 2]
+                    q_depth = F.softplus(q_depth)
+                    k_depth = F.softplus(k_depth)
+                    message = single_head_split_window_attention_rope_depth(query, key, value,
+                        num_splits=attn_num_splits, with_shift=with_shift,
+                        h=height, w=width, attn_mask=shifted_window_attn_mask,
+                        intrinsics=intrinsics, pose=pose, q_depth=q_depth, k_depth=k_depth)
                 else:   
                     message = single_head_split_window_attention(query, key, value,
                                                                 num_splits=attn_num_splits,
@@ -180,6 +219,7 @@ class TransformerBlock(nn.Module):
                  d_model=128,
                  nhead=1,
                  ffn_dim_expansion=4,
+                 rope_type='none',
                  ):
         super(TransformerBlock, self).__init__()
 
@@ -187,11 +227,15 @@ class TransformerBlock(nn.Module):
                                           nhead=nhead,
                                           no_ffn=True,
                                           ffn_dim_expansion=ffn_dim_expansion,
+                                          rope_type=rope_type,
+                                          is_self_attn=True,
                                           )
 
         self.cross_attn_ffn = TransformerLayer(d_model=d_model,
                                                nhead=nhead,
                                                ffn_dim_expansion=ffn_dim_expansion,
+                                               rope_type=rope_type,
+                                               is_self_attn=False,
                                                )
 
     def forward(self, source, target,
@@ -244,6 +288,7 @@ class FeatureTransformer(nn.Module):
                  d_model=128,
                  nhead=1,
                  ffn_dim_expansion=4,
+                 rope_type='none',
                  ):
         super(FeatureTransformer, self).__init__()
 
@@ -254,12 +299,14 @@ class FeatureTransformer(nn.Module):
             TransformerBlock(d_model=d_model,
                              nhead=nhead,
                              ffn_dim_expansion=ffn_dim_expansion,
+                             rope_type=rope_type,
                              )
             for i in range(num_layers)])
 
-        for p in self.parameters():
+        for name, p in self.named_parameters():
             if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
+                if 'q_depth' not in name and 'k_depth' not in name:
+                    nn.init.xavier_uniform_(p)
 
     def forward(self, feature0, feature1,
                 attn_type='swin',

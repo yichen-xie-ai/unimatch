@@ -7,8 +7,8 @@ from functools import partial
 from .utils import split_feature, merge_splits, split_feature_1d, merge_splits_1d
 
 
-def single_head_split_window_attention_rope(q, k, v,
-        num_splits=1, with_shift=False, h=None, w=None, attn_mask=None, intrinsics=None, pose=None):
+def single_head_split_window_attention_rope_depth(q, k, v,
+        num_splits=1, with_shift=False, h=None, w=None, attn_mask=None, intrinsics=None, pose=None, q_depth=None, k_depth=None):
     # ref: https://github.com/microsoft/Swin-Transformer/blob/main/models/swin_transformer.py
     # q, k, v: [B, L, C]
     assert q.dim() == k.dim() == v.dim() == 3
@@ -23,7 +23,7 @@ def single_head_split_window_attention_rope(q, k, v,
     window_size_h = h // num_splits
     window_size_w = w // num_splits
 
-    apply_fn_q, apply_fn_kv, apply_fn_o = compute_rayrope(intrinsics, pose, h, w, head_dim_full=c, device=q.device)
+    apply_fn_q, apply_fn_kv, apply_fn_o = compute_rayrope_depth(q_depth, k_depth, intrinsics, pose, h, w, head_dim_full=c, device=q.device)
     
     q = apply_fn_q(q[:, None]).squeeze(1)
     k = apply_fn_kv(k[:, None]).squeeze(1)
@@ -71,15 +71,16 @@ def single_head_split_window_attention_rope(q, k, v,
     return out
 
 
-def compute_rayrope(intrinsics, pose, feature_height, feature_width, head_dim_full, device):
-    # pose: camera <-- world
+def compute_rayrope_depth(q_depth, k_depth, intrinsics, pose, feature_height, feature_width, head_dim_full, device):
+    # pose: camera <-- world; 
     
-    pose = pose @ torch.inverse(pose[:, :1])
+    pose = pose @ torch.inverse(pose[:, :1]) # camera <-- 0
     num_cameras = pose.shape[1]
     assert num_cameras in [1, 2]
     batch = pose.shape[0]
+    num_heads = q_depth.shape[1]
     
-    head_dim = head_dim_full // 12 * 12
+    head_dim = head_dim_full // 6 * 6
 
     viewmats = pose
     Ks = intrinsics[:, None].repeat(1, num_cameras, 1, 1)
@@ -109,57 +110,50 @@ def compute_rayrope(intrinsics, pose, feature_height, feature_width, head_dim_fu
     q_cam_y = cam_centers[:, 0, :, 1]  # [batch, patch_num]
     q_cam_z = cam_centers[:, 0, :, 2]  # [batch, patch_num]
     
-    q_coeffs_x = _rope_precompute_coeffs_batch(q_cam_x, 100, 25, head_dim // 6)
-    q_coeffs_y = _rope_precompute_coeffs_batch(q_cam_y, 100, 25, head_dim // 6)
-    q_coeffs_z = _rope_precompute_coeffs_batch(q_cam_z, 100, 25, head_dim // 6)
+    q_depth = q_depth.reshape(batch, num_heads, feature_width * feature_height, 2) # [batch, num_heads, patch_num, 2]
+    q_x = q_cam_x[:, None] * q_depth[..., 0] + q_ray_x[:, None] * q_depth[..., 1] # [batch*cameras, num_heads, patch_num]
+    q_y = q_cam_y[:, None] * q_depth[..., 0] + q_ray_y[:, None] * q_depth[..., 1] # [batch*cameras, num_heads, patch_num]
+    q_z = q_cam_z[:, None] * q_depth[..., 0] + q_ray_z[:, None] * q_depth[..., 1] # [batch*cameras, num_heads, patch_num]    
     
-    
-    q_coeffs_ray_x = _rope_precompute_coeffs_batch(q_ray_x, 100, 50, head_dim // 6)
-    q_coeffs_ray_y = _rope_precompute_coeffs_batch(q_ray_y, 100, 50, head_dim // 6)
-    q_coeffs_ray_z = _rope_precompute_coeffs_batch(q_ray_z, 100, 50, head_dim // 6)
+    q_coeffs_x = _rope_precompute_coeffs_batch(q_x, 100, 50, head_dim // 3)
+    q_coeffs_y = _rope_precompute_coeffs_batch(q_y, 100, 50, head_dim // 3)
+    q_coeffs_z = _rope_precompute_coeffs_batch(q_z, 100, 50, head_dim // 3)
 
-    kv_cam_x = cam_centers[:, -1, :, 0].reshape(batch, feature_width * feature_height) # [batch, patch_num, 3]
-    kv_cam_y = cam_centers[:, -1, :, 1].reshape(batch, feature_width * feature_height) # [batch, patch_num, 3]
-    kv_cam_z = cam_centers[:, -1, :, 2].reshape(batch, feature_width * feature_height) # [batch, patch_num, 3]
+    kv_cam_x = cam_centers[:, -1, :, 0].reshape(batch, feature_width * feature_height) # [batch, patch_num]
+    kv_cam_y = cam_centers[:, -1, :, 1].reshape(batch, feature_width * feature_height) # [batch, patch_num]
+    kv_cam_z = cam_centers[:, -1, :, 2].reshape(batch, feature_width * feature_height) # [batch, patch_num]
 
-    kv_ray_x = raydir[:, -1, :, 0].reshape(batch, feature_width * feature_height) # [batch, patch_num, 3]
-    kv_ray_y = raydir[:, -1, :, 1].reshape(batch, feature_width * feature_height) # [batch, patch_num, 3]
-    kv_ray_z = raydir[:, -1, :, 2].reshape(batch, feature_width * feature_height) # [batch, patch_num, 3]
+    kv_ray_x = raydir[:, -1, :, 0].reshape(batch, feature_width * feature_height) # [batch, patch_num]
+    kv_ray_y = raydir[:, -1, :, 1].reshape(batch, feature_width * feature_height) # [batch, patch_num]
+    kv_ray_z = raydir[:, -1, :, 2].reshape(batch, feature_width * feature_height) # [batch, patch_num]
     
-    kv_coeffs_x = _rope_precompute_coeffs_batch(kv_cam_x, 100, 25, head_dim // 6)
-    kv_coeffs_y = _rope_precompute_coeffs_batch(kv_cam_y, 100, 25, head_dim // 6)
-    kv_coeffs_z = _rope_precompute_coeffs_batch(kv_cam_z, 100, 25, head_dim // 6)
+    kv_x = kv_cam_x[:, None] * k_depth[..., 0] + kv_ray_x[:, None] * k_depth[..., 1]  # [batch*cameras, num_heads, cameras*patch_num]
+    kv_y = kv_cam_y[:, None] * k_depth[..., 0] + kv_ray_y[:, None] * k_depth[..., 1]  # [batch*cameras, num_heads, cameras*patch_num]
+    kv_z = kv_cam_z[:, None] * k_depth[..., 0] + kv_ray_z[:, None] * k_depth[..., 1]  # [batch*cameras, num_heads, cameras*patch_num]
     
-    kv_coeffs_ray_x = _rope_precompute_coeffs_batch(kv_ray_x, 100, 50, head_dim // 6)
-    kv_coeffs_ray_y = _rope_precompute_coeffs_batch(kv_ray_y, 100, 50, head_dim // 6)
-    kv_coeffs_ray_z = _rope_precompute_coeffs_batch(kv_ray_z, 100, 50, head_dim // 6)
-    padded_coeffs = [torch.ones([*kv_coeffs_ray_x[0].shape[:-1], (head_dim_full - head_dim)//2], device=device), torch.zeros([*kv_coeffs_ray_x[1].shape[:-1], (head_dim_full - head_dim)//2], device=device)]
+    
+    kv_coeffs_x = _rope_precompute_coeffs_batch(kv_x, 100, 50, head_dim // 3)
+    kv_coeffs_y = _rope_precompute_coeffs_batch(kv_y, 100, 50, head_dim // 3)
+    kv_coeffs_z = _rope_precompute_coeffs_batch(kv_z, 100, 50, head_dim // 3)
+    
+    padded_coeffs = [torch.ones([*kv_coeffs_x[0].shape[:-1], (head_dim_full - head_dim)//2], device=device), torch.zeros([*kv_coeffs_x[1].shape[:-1], (head_dim_full - head_dim)//2], device=device)]
 
     transforms_q = [
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_x), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_y), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_z), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_ray_x), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_ray_y), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_ray_z), head_dim // 6),
+        (partial(_rope_apply_coeffs, coeffs=q_coeffs_x), head_dim // 3),
+        (partial(_rope_apply_coeffs, coeffs=q_coeffs_y), head_dim // 3),
+        (partial(_rope_apply_coeffs, coeffs=q_coeffs_z), head_dim // 3),
         (partial(_rope_apply_coeffs, coeffs=padded_coeffs), head_dim_full - head_dim),
     ]
     transforms_kv = [
-        (partial(_rope_apply_coeffs, coeffs=kv_coeffs_x), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=kv_coeffs_y), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=kv_coeffs_z), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=kv_coeffs_ray_x), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=kv_coeffs_ray_y), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=kv_coeffs_ray_z), head_dim // 6),
+        (partial(_rope_apply_coeffs, coeffs=kv_coeffs_x), head_dim // 3),
+        (partial(_rope_apply_coeffs, coeffs=kv_coeffs_y), head_dim // 3),
+        (partial(_rope_apply_coeffs, coeffs=kv_coeffs_z), head_dim // 3),
         (partial(_rope_apply_coeffs, coeffs=padded_coeffs), head_dim_full - head_dim),
     ]
     transforms_o = [
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_x, inverse=True), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_y, inverse=True), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_z, inverse=True), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_ray_x, inverse=True), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_ray_y, inverse=True), head_dim // 6),
-        (partial(_rope_apply_coeffs, coeffs=q_coeffs_ray_z, inverse=True), head_dim // 6),
+        (partial(_rope_apply_coeffs, coeffs=q_coeffs_x, inverse=True), head_dim // 3),
+        (partial(_rope_apply_coeffs, coeffs=q_coeffs_y, inverse=True), head_dim // 3),
+        (partial(_rope_apply_coeffs, coeffs=q_coeffs_z, inverse=True), head_dim // 3),
         (partial(_rope_apply_coeffs, coeffs=padded_coeffs), head_dim_full - head_dim),
     ]
 
@@ -253,14 +247,15 @@ def _apply_block_diagonal(
     return out
 
 def _rope_precompute_coeffs_batch(
-    positions: torch.Tensor,  # (batch, seqlen)
+    positions: torch.Tensor,  # (batch, num_heads, seqlen)
     freq_base: float,
     freq_scale: float,
     feat_dim: int,
 ):
     """Precompute RoPE coefficients."""
-    assert len(positions.shape) == 2
+    assert len(positions.shape) == 3
     assert feat_dim % 2 == 0
+    num_heads = positions.shape[1]
     num_freqs = feat_dim // 2
     freqs = freq_scale * (
         freq_base
@@ -269,8 +264,8 @@ def _rope_precompute_coeffs_batch(
             / num_freqs
         )
     )
-    angles = positions[:, None, :, None] * freqs
+    angles = positions[:, :, :, None] * freqs
     # Shape should be: `(batch, num_heads, seqlen, num_freqs)`; we're
     # broadcasting across `batch` and `num_heads`.
-    assert angles.shape == (positions.shape[0], 1, positions.shape[1], num_freqs)
+    assert angles.shape == (positions.shape[0], num_heads, positions.shape[2], num_freqs)
     return torch.cos(angles), torch.sin(angles)
