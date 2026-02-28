@@ -1,6 +1,7 @@
 import argparse
 import os
 import numpy as np
+import time
 import torch
 import torch.utils.data
 from torch.utils.tensorboard import SummaryWriter
@@ -74,6 +75,8 @@ def get_args_parser():
     # model: parameter-free
     parser.add_argument('--attn_type', default='swin', type=str,
                         help='attention function')
+    parser.add_argument('--rope_type', default='none', type=str,
+                        help='rope type')
     parser.add_argument('--attn_splits_list', default=[2], type=int, nargs='+',
                         help='number of splits in attention')
     parser.add_argument('--min_depth', default=0.5, type=float,
@@ -104,7 +107,7 @@ def get_args_parser():
 
     # distributed training
     parser.add_argument('--distributed', action='store_true')
-    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument("--local-rank", "--local_rank", type=int, default=0)
     parser.add_argument('--launcher', default='none', type=str)
     parser.add_argument('--gpu_ids', default=0, type=int, nargs='+')
 
@@ -115,12 +118,8 @@ def get_args_parser():
 
 def main(args):
     print_info = not args.eval and args.inference_dir is None
-    if args.local_rank == 0 and print_info:
-        print(args)
-        misc.save_args(args)
-        misc.check_path(args.checkpoint_dir)
-        misc.save_command(args.checkpoint_dir)
-
+    
+    # Set random seed before distributed initialization
     seed = args.seed
     torch.manual_seed(seed)
     torch.cuda.manual_seed(args.seed)
@@ -128,25 +127,41 @@ def main(args):
 
     torch.backends.cudnn.benchmark = True
 
+    if args.local_rank == 0 and print_info:
+        print(args)
+        misc.save_args(args)
+        misc.check_path(args.checkpoint_dir)
+        misc.save_command(args.checkpoint_dir)
+
     if args.launcher == 'none':
         args.distributed = False
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     else:
         args.distributed = True
-
-        # adjust batch size for each gpu
-        assert args.batch_size % torch.cuda.device_count() == 0
-        args.batch_size = args.batch_size // torch.cuda.device_count()
+        
+        # Print debug info before distributed init
+        print(f'[Rank {args.local_rank}] Starting distributed initialization...')
 
         dist_params = dict(backend='nccl')
         init_dist(args.launcher, **dist_params)
+        
+        print(f'[Rank {args.local_rank}] Distributed initialized successfully')
+        
         # re-set gpu_ids with distributed training mode
         _, world_size = get_dist_info()
         args.gpu_ids = range(world_size)
+        
+        # adjust batch size for each gpu
+        assert args.batch_size % world_size == 0
+        args.batch_size = args.batch_size // world_size
+        
         device = torch.device('cuda:{}'.format(args.local_rank))
-
-        setup_for_distributed(args.local_rank == 0)
-
+    
+    # Synchronize before model creation
+    if args.distributed:
+        torch.distributed.barrier()
+        print(f'[Rank {args.local_rank}] Starting model creation...')
+        
     # model
     if args.depthsplat_depth:
         model = UniMatchDepthSplat(num_scales=args.num_scales,
@@ -163,14 +178,23 @@ def main(args):
                          reg_refine=args.reg_refine,
                          task=args.task).to(device)
 
+    if args.distributed:
+        print(f'[Rank {args.local_rank}] Model created, syncing before DDP...')
+        torch.distributed.barrier()
+    
     if print_info:
         print(model)
 
     if args.distributed:
+        print(f'[Rank {args.local_rank}] Initializing DDP...')
+        
         model = torch.nn.parallel.DistributedDataParallel(
-            model.to(device),
+            model,
             device_ids=[args.local_rank],
-            output_device=args.local_rank)
+            output_device=args.local_rank,
+            find_unused_parameters=False)
+        
+        print(f'[Rank {args.local_rank}] DDP initialized successfully!')
         model_without_ddp = model.module
     else:
         if torch.cuda.device_count() > 1:
@@ -180,6 +204,8 @@ def main(args):
             model_without_ddp = model.module
         else:
             model_without_ddp = model
+
+    setup_for_distributed(args.local_rank == 0)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     if print_info:
@@ -192,9 +218,13 @@ def main(args):
 
     start_epoch = 0
     start_step = 0
+    
     # resume checkpoints
     if args.resume:
-        print("=> Load checkpoint: %s" % args.resume)
+        if args.distributed:
+            print(f'[Rank {args.local_rank}] Loading checkpoint: {args.resume}')
+        else:
+            print("=> Load checkpoint: %s" % args.resume)
 
         loc = 'cuda:{}'.format(args.local_rank) if torch.cuda.is_available() else 'cpu'
         checkpoint = torch.load(args.resume, map_location=loc)
@@ -210,6 +240,17 @@ def main(args):
 
         if print_info:
             print('start_epoch: %d, start_step: %d' % (start_epoch, start_step))
+        
+        # Synchronize after loading checkpoint
+        if args.distributed:
+            torch.distributed.barrier()
+            print(f'[Rank {args.local_rank}] Checkpoint loaded and synced')
+    
+    # Synchronize before starting training/evaluation
+    if args.distributed:
+        torch.distributed.barrier()
+    
+    print("Synchronized before starting training/evaluation")
 
     # evaluation
     if args.eval:
@@ -241,6 +282,7 @@ def main(args):
                                           padding_factor=args.padding_factor,
                                           inference_size=args.inference_size,
                                           attn_type=args.attn_type,
+                                          rope_type=args.rope_type,
                                           attn_splits_list=args.attn_splits_list,
                                           prop_radius_list=args.prop_radius_list,
                                           num_reg_refine=args.num_reg_refine,
@@ -282,6 +324,7 @@ def main(args):
 
         return
 
+    print("Building dataset...")
     # build dataset
     train_transform = augmentation.Compose([
         augmentation.RandomColor(),
@@ -297,22 +340,26 @@ def main(args):
                                    )
 
     elif args.dataset == 'demon':
-        train_set = DemonDataset(mode='train',
+        # train_set = DemonDataset(mode='train',
+        #                          transforms=train_transform,
+        #                          )
+        train_set = DemonDataset(mode='test',
                                  transforms=train_transform,
                                  )
     else:
         raise NotImplementedError
-
+    
     # multi-processing
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(
             train_set,
-            num_replicas=torch.cuda.device_count(),
+            num_replicas=world_size,
             rank=args.local_rank
         )
     else:
         train_sampler = None
 
+    print("Building data loader...")
     train_loader = torch.utils.data.DataLoader(train_set, batch_size=args.batch_size,
                                                shuffle=(train_sampler is None),
                                                num_workers=args.workers, pin_memory=True,
@@ -338,7 +385,7 @@ def main(args):
     total_steps = start_step
     epoch = start_epoch
     print('Start training')
-
+    time_start = time.time()
     while total_steps < args.num_steps:
         model.train()
 
@@ -361,6 +408,7 @@ def main(args):
             results_dict = model(img_ref,
                                  img_tgt,
                                  attn_type=args.attn_type,
+                                 rope_type=args.rope_type,
                                  attn_splits_list=args.attn_splits_list,
                                  prop_radius_list=args.prop_radius_list,
                                  num_reg_refine=args.num_reg_refine,
@@ -443,6 +491,8 @@ def main(args):
             total_steps += 1
 
             if args.local_rank == 0:
+                if total_steps % 100 == 1:
+                    print('Step: %d' % total_steps, 'Loss: %f' % loss.item(), 'Time: %f' % ((time.time() - time_start) / total_steps))
                 if total_steps % args.save_ckpt_freq == 0 or total_steps == args.num_steps:
                     print('Save checkpoint at step: %d' % total_steps)
                     checkpoint_path = os.path.join(args.checkpoint_dir, 'step_%06d.pth' % total_steps)
@@ -502,6 +552,7 @@ def main(args):
                                                   padding_factor=args.padding_factor,
                                                   inference_size=args.inference_size,
                                                   attn_type=args.attn_type,
+                                                  rope_type=args.rope_type,
                                                   attn_splits_list=args.attn_splits_list,
                                                   prop_radius_list=args.prop_radius_list,
                                                   num_reg_refine=args.num_reg_refine,
@@ -559,8 +610,15 @@ def main(args):
 if __name__ == '__main__':
     parser = get_args_parser()
     args = parser.parse_args()
-
-    if 'LOCAL_RANK' not in os.environ:
-        os.environ['LOCAL_RANK'] = str(args.local_rank)
+    
+    # Handle LOCAL_RANK for distributed training
+    if 'LOCAL_RANK' in os.environ:
+        args.local_rank = int(os.environ['LOCAL_RANK'])
+    elif hasattr(args, 'local_rank') and args.local_rank is not None:
+        # Use command line argument if provided
+        pass
+    else:
+        # Default to 0 for non-distributed training
+        args.local_rank = 0
 
     main(args)

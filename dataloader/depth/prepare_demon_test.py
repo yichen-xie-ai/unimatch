@@ -30,7 +30,7 @@ def dump_example(dataset_name):
             scale = 1
 
         print("Processing sequence {:d}/{:d}".format(seq_idx, len(file)))
-        dump_dir = os.path.join(path, 'test', dataset_name + "_" + "{:05d}".format(seq_idx))
+        dump_dir = os.path.join(path, '../../datasets/Demon/test', dataset_name + "_" + "{:05d}".format(seq_idx))
         if not os.path.isdir(dump_dir):
             os.mkdir(dump_dir)
         dump_dir = Path(dump_dir)

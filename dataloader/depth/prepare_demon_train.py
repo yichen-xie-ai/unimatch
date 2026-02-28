@@ -35,7 +35,7 @@ def dump_example(dataset_name):
             continue  # Skip error files
 
         print("Processing sequence {:d}/{:d}".format(seq_idx, len(file)))
-        dump_dir = os.path.join(path, '../train', dataset_name + "_" + "{:05d}".format(seq_idx))
+        dump_dir = os.path.join(path, '../../datasets/Demon/train', dataset_name + "_" + "{:05d}".format(seq_idx))
         if not os.path.isdir(dump_dir):
             os.mkdir(dump_dir)
         dump_dir = Path(dump_dir)
@@ -76,7 +76,7 @@ def dump_example(dataset_name):
 
 
 def preparedata():
-    num_threads = 1
+    num_threads = 16
     SUB_DATASET_NAMES = ([
         "rgbd_10_to_20_3d_train", "rgbd_10_to_20_handheld_train", "rgbd_10_to_20_simple_train",
         "rgbd_20_to_inf_3d_train", "rgbd_20_to_inf_handheld_train", "rgbd_20_to_inf_simple_train",

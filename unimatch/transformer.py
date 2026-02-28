@@ -4,6 +4,8 @@ import torch.nn as nn
 from .attention import (single_head_full_attention, single_head_split_window_attention,
                         single_head_full_attention_1d, single_head_split_window_attention_1d)
 from .utils import generate_shift_window_attn_mask, generate_shift_window_attn_mask_1d
+from .attention_rope import single_head_split_window_attention_rope
+from .attention_urope import multihead_split_window_attention_urope
 
 
 class TransformerLayer(nn.Module):
@@ -38,6 +40,8 @@ class TransformerLayer(nn.Module):
             )
 
             self.norm2 = nn.LayerNorm(d_model)
+        
+        self.is_self_attn = self.no_ffn
 
     def forward(self, source, target,
                 height=None,
@@ -45,8 +49,11 @@ class TransformerLayer(nn.Module):
                 shifted_window_attn_mask=None,
                 shifted_window_attn_mask_1d=None,
                 attn_type='swin',
+                rope_type='none',
                 with_shift=False,
                 attn_num_splits=None,
+                intrinsics=None,
+                pose=None
                 ):
         # source, target: [B, L, C]
         query, key, value = source, target, target
@@ -59,19 +66,41 @@ class TransformerLayer(nn.Module):
         key = self.k_proj(key)  # [B, L, C]
         value = self.v_proj(value)  # [B, L, C]
 
-        if attn_type == 'swin' and attn_num_splits > 1:  # self, cross-attn: both swin 2d
+        if 'swin' in attn_type and attn_num_splits > 1: # self, cross-attn: both swin 2d
             if self.nhead > 1:
                 # we observe that multihead attention slows down the speed and increases the memory consumption
                 # without bringing obvious performance gains and thus the implementation is removed
                 raise NotImplementedError
             else:
-                message = single_head_split_window_attention(query, key, value,
-                                                             num_splits=attn_num_splits,
-                                                             with_shift=with_shift,
-                                                             h=height,
-                                                             w=width,
-                                                             attn_mask=shifted_window_attn_mask,
-                                                             )
+                if rope_type == 'rayrope':
+                    message = single_head_split_window_attention_rope(query, key, value,
+                                                                     num_splits=attn_num_splits,
+                                                                     with_shift=with_shift,
+                                                                     h=height,
+                                                                     w=width,
+                                                                     attn_mask=shifted_window_attn_mask,
+                                                                     intrinsics=intrinsics,
+                                                                     pose=pose,
+                                                                     )
+                elif rope_type == 'urope':
+                    message = multihead_split_window_attention_urope(query, key, value,
+                                                                     num_splits=attn_num_splits,
+                                                                     with_shift=with_shift,
+                                                                     h=height,
+                                                                     w=width,
+                                                                     attn_mask=shifted_window_attn_mask,
+                                                                     intrinsics=intrinsics,
+                                                                     pose=pose,
+                                                                     is_self_attn=is_self_attn,
+                                                                    )
+                else:   
+                    message = single_head_split_window_attention(query, key, value,
+                                                                num_splits=attn_num_splits,
+                                                                with_shift=with_shift,
+                                                                h=height,
+                                                                w=width,
+                                                                attn_mask=shifted_window_attn_mask,
+                                                                )
 
         elif attn_type == 'self_swin2d_cross_1d':  # self-attn: swin 2d, cross-attn: full 1d
             if self.nhead > 1:
@@ -171,8 +200,11 @@ class TransformerBlock(nn.Module):
                 shifted_window_attn_mask=None,
                 shifted_window_attn_mask_1d=None,
                 attn_type='swin',
+                rope_type='none',
                 with_shift=False,
                 attn_num_splits=None,
+                intrinsics=None,
+                pose=None,
                 ):
         # source, target: [B, L, C]
 
@@ -182,8 +214,11 @@ class TransformerBlock(nn.Module):
                                 width=width,
                                 shifted_window_attn_mask=shifted_window_attn_mask,
                                 attn_type=attn_type,
+                                rope_type=rope_type,
                                 with_shift=with_shift,
                                 attn_num_splits=attn_num_splits,
+                                intrinsics=intrinsics,
+                                pose=pose[:,:1],
                                 )
 
         # cross attention and ffn
@@ -193,8 +228,11 @@ class TransformerBlock(nn.Module):
                                      shifted_window_attn_mask=shifted_window_attn_mask,
                                      shifted_window_attn_mask_1d=shifted_window_attn_mask_1d,
                                      attn_type=attn_type,
+                                     rope_type=rope_type,
                                      with_shift=with_shift,
                                      attn_num_splits=attn_num_splits,
+                                     intrinsics=intrinsics,
+                                     pose=pose,
                                      )
 
         return source
@@ -225,7 +263,10 @@ class FeatureTransformer(nn.Module):
 
     def forward(self, feature0, feature1,
                 attn_type='swin',
+                rope_type='none',
                 attn_num_splits=None,
+                intrinsics=None,
+                pose=None,
                 **kwargs,
                 ):
 
@@ -271,15 +312,22 @@ class FeatureTransformer(nn.Module):
         concat0 = torch.cat((feature0, feature1), dim=0)  # [2B, H*W, C]
         concat1 = torch.cat((feature1, feature0), dim=0)  # [2B, H*W, C]
 
+        pose_flipped = torch.flip(pose, dims=[1])
+        pose = torch.cat([pose, pose_flipped], dim=0)
+        intrinsics = torch.cat([intrinsics, intrinsics], dim=0)
+        
         for i, layer in enumerate(self.layers):
             concat0 = layer(concat0, concat1,
                             height=h,
                             width=w,
                             attn_type=attn_type,
+                            rope_type=rope_type,
                             with_shift='swin' in attn_type and attn_num_splits > 1 and i % 2 == 1,
                             attn_num_splits=attn_num_splits,
                             shifted_window_attn_mask=shifted_window_attn_mask,
                             shifted_window_attn_mask_1d=shifted_window_attn_mask_1d,
+                            intrinsics=intrinsics,
+                            pose=pose,
                             )
 
             # update feature1

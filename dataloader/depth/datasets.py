@@ -142,7 +142,8 @@ class DemonDataset(Dataset):
 
         demi_length = sequence_length // 2
 
-        for scene in scenes:
+        print(f"len(scenes): {len(scenes)}")
+        for scene_idx, scene in enumerate(scenes):
             intrinsics = np.genfromtxt(os.path.join(scene, 'cam.txt')).astype(np.float32).reshape((3, 3))  # [3, 3]
             poses = np.genfromtxt(os.path.join(scene, 'poses.txt')).astype(np.float32)
             imgs = sorted(glob(os.path.join(scene, '*.jpg')))
@@ -168,8 +169,7 @@ class DemonDataset(Dataset):
                 for j in shifts:
                     img_tgt = imgs[j]
                     pose_tgt = np.concatenate((poses[j, :].reshape((3, 4)), np.array([[0, 0, 0, 1]])), axis=0)
-                    pose = (pose_tgt @ np.linalg.inv(pose_ref)).astype(np.float32)  # [4, 4]
-
+                    pose = (pose_tgt @ np.linalg.inv(pose_ref)).astype(np.float32)  # [4, 4] target <-- reference
                     sample = (img_ref, img_tgt, pose, depth, intrinsics)
 
                     self.samples.append(sample)

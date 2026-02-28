@@ -94,6 +94,7 @@ class UniMatch(nn.Module):
 
     def forward(self, img0, img1,
                 attn_type=None,
+                rope_type=None,
                 attn_splits_list=None,
                 corr_radius_list=None,
                 prop_radius_list=None,
@@ -175,12 +176,16 @@ class UniMatch(nn.Module):
             prop_radius = prop_radius_list[scale_idx]
 
             # add position to features
-            feature0, feature1 = feature_add_position(feature0, feature1, attn_splits, self.feature_channels)
+            # feature0, feature1 = feature_add_position(feature0, feature1, attn_splits, self.feature_channels)
 
             # Transformer
+            pad_pose = torch.eye(4)[None].repeat(pose.shape[0], 1, 1).type_as(pose)
             feature0, feature1 = self.transformer(feature0, feature1,
                                                   attn_type=attn_type,
+                                                  rope_type=rope_type,
                                                   attn_num_splits=attn_splits,
+                                                  intrinsics=intrinsics_curr,
+                                                  pose=torch.stack([pad_pose, pose], dim=1),
                                                   )
 
             # correlation and softmax
