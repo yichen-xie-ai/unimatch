@@ -343,7 +343,8 @@ def main(args):
     elif args.dataset == 'demon':
         train_set = DemonDataset(mode='train',
                                  transforms=train_transform,
-                                 )
+                                 ) 
+
     else:
         raise NotImplementedError
     
@@ -362,6 +363,8 @@ def main(args):
                                                shuffle=(train_sampler is None),
                                                num_workers=args.workers, pin_memory=True,
                                                sampler=train_sampler,
+                                               prefetch_factor=8,
+                                               persistent_workers=True,
                                                drop_last=True)
 
     last_epoch = start_step if args.resume and not args.no_resume_optimizer else -1
@@ -391,17 +394,17 @@ def main(args):
             train_sampler.set_epoch(epoch)
 
         for i, sample in enumerate(train_loader):
-            img_ref = sample['img_ref'].to(device)
-            img_tgt = sample['img_tgt'].to(device)
-            intrinsics = sample['intrinsics'].to(device)
-            pose = sample['pose'].to(device)  # relative pose, [B, 4, 4]
-            gt_depth = sample['depth'].to(device)
+            img_ref = sample['img_ref'].to(device, non_blocking=True)
+            img_tgt = sample['img_tgt'].to(device, non_blocking=True)
+            intrinsics = sample['intrinsics'].to(device, non_blocking=True)
+            pose = sample['pose'].to(device, non_blocking=True)  # relative pose, [B, 4, 4]
+            gt_depth = sample['depth'].to(device, non_blocking=True)
 
             valid_mask = (gt_depth >= args.min_depth) & (gt_depth <= args.max_depth) & \
                          (gt_depth == gt_depth)
 
             if 'valid' in sample:
-                valid_mask = valid_mask * sample['valid'].to(device)  # [B, H, W]
+                valid_mask = valid_mask * sample['valid'].to(device, non_blocking=True)  # [B, H, W]
 
             results_dict = model(img_ref,
                                  img_tgt,

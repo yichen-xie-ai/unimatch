@@ -71,33 +71,40 @@ def multihead_split_window_attention_urope(q, k, v,
     batch_chunk_size = max(1, b_new)  # 每次处理 1/4 的 batch，可根据显存调整
     out = []
     attn_mask = attn_mask.repeat(b, 1, 1)
-    for i in range(num_heads):
-        out_head_chunks = []
-        for chunk_start in range(0, b_new, batch_chunk_size):
-            chunk_end = min(chunk_start + batch_chunk_size, b_new)
-            q_chunk = q[i, chunk_start:chunk_end]  # [chunk_size, H/K*W/K, C_head]
-            k_chunk = k[i, chunk_start:chunk_end]  # [chunk_size, H/K*W/K, C_head]
-            v_chunk = v[i, chunk_start:chunk_end]  # [chunk_size, H/K*W/K, C_head]
+    # for i in range(num_heads):
+    #     out_head_chunks = []
+    #     for chunk_start in range(0, b_new, batch_chunk_size):
+    #         chunk_end = min(chunk_start + batch_chunk_size, b_new)
+    #         q_chunk = q[i, chunk_start:chunk_end]  # [chunk_size, H/K*W/K, C_head]
+    #         k_chunk = k[i, chunk_start:chunk_end]  # [chunk_size, H/K*W/K, C_head]
+    #         v_chunk = v[i, chunk_start:chunk_end]  # [chunk_size, H/K*W/K, C_head]
             
-            scores = torch.matmul(q_chunk, k_chunk.permute(0, 2, 1)) / scale_factor  # [chunk_size, H/K*W/K, H/K*W/K]
+    #         scores = torch.matmul(q_chunk, k_chunk.permute(0, 2, 1)) / scale_factor  # [chunk_size, H/K*W/K, H/K*W/K]
 
-            if with_shift:
-                scores += attn_mask[chunk_start:chunk_end]
+    #         if with_shift:
+    #             scores += attn_mask[chunk_start:chunk_end]
 
-            attn = torch.softmax(scores, dim=-1)
+    #         attn = torch.softmax(scores, dim=-1)
 
-            out_head_chunk = torch.matmul(attn, v_chunk)  # [chunk_size, H/K*W/K, C_head]
-            del scores, attn, q_chunk, k_chunk, v_chunk
-            gc.collect()
-            torch.cuda.empty_cache()
-            out_head_chunks.append(out_head_chunk)
+    #         out_head_chunk = torch.matmul(attn, v_chunk)  # [chunk_size, H/K*W/K, C_head]
+    #         del scores, attn, q_chunk, k_chunk, v_chunk
+    #         gc.collect()
+    #         torch.cuda.empty_cache()
+    #         out_head_chunks.append(out_head_chunk)
         
-        out_head = torch.cat(out_head_chunks, dim=0)  # [B*K*K, H/K*W/K, C_head]
-        del out_head_chunks
-        gc.collect()
-        torch.cuda.empty_cache()
-        out.append(out_head)
-    out = torch.stack(out, dim=0) # [num_heads, B*K*K, H/K*W/K, C_head]
+    #     out_head = torch.cat(out_head_chunks, dim=0)  # [B*K*K, H/K*W/K, C_head]
+    #     del out_head_chunks
+    #     gc.collect()
+    #     torch.cuda.empty_cache()
+    #     out.append(out_head)
+
+    # out = torch.stack(out, dim=0) # [num_heads, B*K*K, H/K*W/K, C_head]
+
+    scores = torch.matmul(q, k.permute(0, 1, 3, 2)) / scale_factor  # [num_heads, B*K*K, H/K*W/K, H/K*W/K]
+    if with_shift:
+        scores += attn_mask[None]
+    attn = torch.softmax(scores, dim=-1) # [num_heads, B*K*K, H/K*W/K, H/K*W/K]
+    out = torch.matmul(attn, v)  # [num_heads, B*K*K, H/K*W/K, C_head]
     
     out = out.permute(1, 2, 0, 3) # [B*K*K, H/K*W/K, num_heads, C_head]
     out = out.flatten(2, 3) # [B*K*K, H/K*W/K, C_head*num_heads]

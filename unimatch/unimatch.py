@@ -178,7 +178,7 @@ class UniMatch(nn.Module):
             prop_radius = prop_radius_list[scale_idx]
 
             # add position to features
-            # feature0, feature1 = feature_add_position(feature0, feature1, attn_splits, self.feature_channels)
+            feature0, feature1 = feature_add_position(feature0, feature1, attn_splits, self.feature_channels)
 
             # Transformer
             pad_pose = torch.eye(4)[None].repeat(pose.shape[0], 1, 1).type_as(pose)

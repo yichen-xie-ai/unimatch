@@ -3,11 +3,7 @@
 # basic GMDepth without any refinement (1/8 feature only)
 
 # number of gpus for training, please set according to your hardware
-<<<<<<< Updated upstream
 # trained on 3x 80GB A100 gpus
-=======
-# trained on 3 x 80GB A100 gpus
->>>>>>> Stashed changes
 NUM_GPUS=3
 
 
@@ -34,7 +30,7 @@ NUM_GPUS=3
 
 # demon, resume flow things model
 DATASET=scenes11
-CHECKPOINT_DIR=checkpoints_depth/demon-gmdepth-scale1_${DATASET}_bs78-urope_H2-woSine && \
+CHECKPOINT_DIR=checkpoints_depth/demon-gmdepth-scale1_${DATASET}_bs78-urope_H4 && \
 mkdir -p ${CHECKPOINT_DIR} && \
 NCCL_P2P_DISABLE=1 torchrun \
 --nproc_per_node=${NUM_GPUS} \
@@ -53,7 +49,7 @@ main_depth.py \
 --val_freq 5000 \
 --save_ckpt_freq 5000 \
 --num_steps 100000 \
---workers 8 \
+--workers 12 \
 --attn_type swin \
 --rope_type urope \
 2>&1 | tee -a ${CHECKPOINT_DIR}/train.log
